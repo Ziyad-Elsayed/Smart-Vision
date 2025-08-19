@@ -1,6 +1,4 @@
-# Vision Assistant
-
-![Vision Assistant Logo](assets/vision_assistant_logo.png)
+# Smart Vision 
 
 ## Overview
 
