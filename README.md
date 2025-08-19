@@ -2,7 +2,7 @@
 
 ## Overview
 
-Vision Assistant is a Python-based application designed to help visually impaired individuals navigate their environment and interact with the world around them using AI-powered computer vision and natural language processing.
+ Smart Vision is a Python-based application designed to help visually impaired individuals navigate their environment and interact with the world around them using AI-powered computer vision and natural language processing.
 
 ## Features
 
