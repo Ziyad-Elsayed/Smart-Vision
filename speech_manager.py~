@@ -1,0 +1,331 @@
+import os
+import threading
+import queue
+import time
+from typing import Optional, Callable
+import speech_recognition as sr
+import pyttsx3
+
+
+class SpeechRecognizer:
+    """Handles speech recognition functionality."""
+
+    def __init__(self, callback: Callable[[str], None]):
+        """
+        Initialize the speech recognizer.
+
+        Args:
+            callback: Function to call when speech is recognized
+        """
+        self.recognizer = sr.Recognizer()
+        self.callback = callback
+        self.running = False
+        self.paused = False
+        self.recognition_thread = None
+
+        # Adjust recognition parameters
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.energy_threshold = 300  # May need adjustment based on environment
+        self.recognizer.pause_threshold = 0.8  # Shorter pause for more responsive recognition
+
+    def start(self):
+        """Start the speech recognition thread."""
+        if self.recognition_thread is not None and self.recognition_thread.is_alive():
+            return
+
+        self.running = True
+        self.recognition_thread = threading.Thread(target=self._recognition_worker)
+        self.recognition_thread.daemon = True
+        self.recognition_thread.start()
+
+    def stop(self):
+        """Stop the speech recognition thread."""
+        self.running = False
+        if self.recognition_thread:
+            self.recognition_thread.join(timeout=2.0)
+
+    def toggle_pause(self):
+        """Toggle pause state."""
+        self.paused = not self.paused
+        return self.paused
+
+    def _recognition_worker(self):
+        """Worker thread that listens for speech."""
+        while self.running:
+            if self.paused:
+                time.sleep(0.1)
+                continue
+
+            try:
+                with sr.Microphone() as source:
+                    print("Listening...")
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                    audio = self.recognizer.listen(source, timeout=3, phrase_time_limit=5)
+
+                # سنحاول استخدام خدمات مختلفة للتعرف على الكلام
+                recognized = False
+
+                try:
+                    # محاولة استخدام PocketSphinx (محلي)
+                    text = self.recognizer.recognize_sphinx(audio)
+                    print(f"Recognized (Sphinx): {text}")
+                    recognized = True
+                except Exception as sphinx_error:
+                    print(f"Sphinx recognition failed: {sphinx_error}")
+
+                    try:
+                        # محاولة استخدام Google
+                        text = self.recognizer.recognize_google(audio)
+                        print(f"Recognized (Google): {text}")
+                        recognized = True
+                    except sr.UnknownValueError:
+                        print("Speech not understood")
+                    except sr.RequestError as e:
+                        print(f"Google recognition error: {e}")
+
+                        try:
+                            # نحاول استخدام Microsoft Azure Speech
+                            AZURE_SPEECH_KEY = "YOUR_KEY"  # يمكنك الحصول على مفتاح مجاني
+                            text = self.recognizer.recognize_azure(audio, key=AZURE_SPEECH_KEY)
+                            print(f"Recognized (Azure): {text}")
+                            recognized = True
+                        except Exception as azure_error:
+                            print(f"Azure recognition failed: {azure_error}")
+
+                if recognized and text and self.callback:
+                    self.callback(text)
+
+            except Exception as e:
+                print(f"Microphone error: {e}")
+                time.sleep(1)
+
+
+class TextToSpeech:
+    """Handles text-to-speech functionality."""
+
+    def __init__(self):
+        """Initialize the text-to-speech engine."""
+        self.engine = pyttsx3.init()
+        self.engine.setProperty('rate', 150)  # سرعة أقل للفهم الأفضل
+        self.engine.setProperty('volume', 1.0)  # أعلى مستوى للصوت
+        self.speech_queue = queue.Queue()
+        self.speech_thread = None
+        self.running = False
+        self.speaking = False
+        self.current_text = ""
+
+        # Try to set a more natural voice if available
+        voices = self.engine.getProperty('voices')
+        for voice in voices:
+            # Look for a female voice as they're often clearer
+            if "female" in voice.name.lower():
+                self.engine.setProperty('voice', voice.id)
+                break
+
+    def start(self):
+        """Start the speech thread."""
+        if self.speech_thread is not None and self.speech_thread.is_alive():
+            return
+
+        self.running = True
+        self.speech_thread = threading.Thread(target=self._speech_worker)
+        self.speech_thread.daemon = True
+        self.speech_thread.start()
+
+    def stop(self):
+        """Stop the speech thread."""
+        self.running = False
+        self.engine.stop()
+        if self.speech_thread:
+            self.speech_thread.join(timeout=2.0)
+
+    def speak(self, text: str, interrupt: bool = True):
+        """
+        Add text to the speech queue.
+
+        Args:
+            text: Text to speak
+            interrupt: Whether to interrupt current speech
+        """
+        if not text or not text.strip():
+            return
+
+        if interrupt and self.speaking:
+            self.engine.stop()
+
+        try:
+            print(f"Speaking: {text}")
+            # تقسيم النص إلى جمل للنطق بشكل أفضل
+            sentences = text.split('.')
+            for sentence in sentences:
+                if sentence.strip():
+                    # استخدم runAndWait للتأكد من نطق النص بالكامل
+                    self.engine.say(sentence.strip())
+                    self.engine.runAndWait()
+            self.speaking = False
+        except Exception as e:
+            print(f"Speech error: {e}")
+            # في حالة الفشل، جرّب مرة أخرى بطريقة بسيطة
+            try:
+                self.engine.say(text)
+                self.engine.runAndWait()
+            except:
+                print("Failed to speak text")
+
+    def is_speaking(self) -> bool:
+        """Return whether the engine is currently speaking."""
+        return self.speaking
+
+    def _speech_worker(self):
+        """Worker thread that processes the speech queue."""
+        while self.running:
+            try:
+                if self.speech_queue.empty():
+                    time.sleep(0.1)
+                    continue
+
+                text = self.speech_queue.get()
+                self.speaking = True
+                self.current_text = text
+
+                # Break long text into sentences for more natural pauses
+                sentences = text.split('.')
+                for sentence in sentences:
+                    if sentence.strip():
+                        self.engine.say(sentence.strip())
+                        self.engine.runAndWait()
+
+                        # Check if we should stop
+                        if not self.running:
+                            break
+
+                self.speaking = False
+                self.speech_queue.task_done()
+
+            except Exception as e:
+                print(f"Speech error: {e}")
+                self.speaking = False
+                time.sleep(0.5)  # Wait before retrying
+
+    def set_rate(self, rate: int):
+        """Set the speech rate."""
+        self.engine.setProperty('rate', rate)
+
+    def set_volume(self, volume: float):
+        """Set the speech volume (0-1)."""
+        self.engine.setProperty('volume', min(max(volume, 0), 1))
+
+    def set_voice(self, voice_index: int):
+        """Set the voice by index."""
+        voices = self.engine.getProperty('voices')
+        if 0 <= voice_index < len(voices):
+            self.engine.setProperty('voice', voices[voice_index].id)
+
+
+class SpeechManager:
+    """Combines speech recognition and text-to-speech capabilities."""
+
+    def __init__(self, speech_callback: Optional[Callable[[str], None]] = None):
+        """
+        Initialize the speech manager.
+
+        Args:
+            speech_callback: Function to call when speech is recognized
+        """
+        try:
+            self.tts = TextToSpeech()
+            # Test the TTS engine
+            self.tts.speak("Test", interrupt=True)
+        except Exception as e:
+            print(f"Error initializing primary TTS: {e}")
+            print("Falling back to alternate TTS")
+            try:
+                self.tts = PygameTTS()
+            except Exception as e2:
+                print(f"Error initializing alternate TTS: {e2}")
+                print("Speech output will not be available")
+                self.tts = None
+
+        self.recognizer = SpeechRecognizer(speech_callback or self._default_callback)
+    def start(self):
+        """Start both speech components."""
+        self.tts.start()
+        self.recognizer.start()
+
+    def stop(self):
+        """Stop both speech components."""
+        self.tts.stop()
+        self.recognizer.stop()
+
+    def speak(self, text: str, interrupt: bool = True):
+        """Speak text."""
+        self.tts.speak(text, interrupt)
+
+    def toggle_recognition(self):
+        """Toggle speech recognition on/off."""
+        return self.recognizer.toggle_pause()
+
+    def _default_callback(self, text: str):
+        """Default callback that echoes recognized speech."""
+        print(f"Recognized: {text}")
+        self.tts.speak(f"You said: {text}")
+
+    def configure(self, settings: dict):
+        """Apply configuration settings."""
+        if 'voice_rate' in settings:
+            self.tts.set_rate(settings['voice_rate'])
+
+        if 'volume' in settings:
+            self.tts.set_volume(settings['volume'] / 100.0)  # Convert 0-100 to 0-1
+
+        if 'voice' in settings:
+            self.tts.set_voice(settings['voice'])
+
+    class PygameTTS:
+        """استخدام pygame للنطق الصوتي عبر Google TTS."""
+
+        def __init__(self):
+            # تأكد من تثبيت pygame وgTTS
+            import pygame
+            from gtts import gTTS
+
+            # تهيئة pygame mixer
+            pygame.mixer.init()
+            self.temp_file = "speech.mp3"
+            self.is_speaking = False
+
+        def speak(self, text: str, interrupt: bool = True):
+            if not text or not text.strip():
+                return
+
+            import pygame
+            from gtts import gTTS
+
+            if interrupt and self.is_speaking:
+                pygame.mixer.music.stop()
+
+            try:
+                print(f"Google TTS Speaking: {text}")
+                tts = gTTS(text=text, lang='en', slow=False)
+                tts.save(self.temp_file)
+
+                pygame.mixer.music.load(self.temp_file)
+                pygame.mixer.music.play()
+                self.is_speaking = True
+
+                # انتظر حتى ينتهي النطق
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
+
+                self.is_speaking = False
+
+            except Exception as e:
+                print(f"TTS Error: {e}")
+
+        def stop(self):
+            import pygame
+            try:
+                pygame.mixer.music.stop()
+                self.is_speaking = False
+            except:
+                pass
